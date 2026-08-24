@@ -131,7 +131,7 @@ class AnsiTerminalBuffer(
                     }
                     i = end
                 }
-                '7' -> { savedRow = row; savedCol = col; i += 2 }
+                '7' -> { savedRow = row; savedCol = col.coerceAtMost(cols - 1); i += 2 }
                 '8' -> { row = savedRow.coerceIn(0, rows - 1); col = savedCol.coerceIn(0, cols - 1); i += 2 }
                 'D' -> { lineFeed(); i += 2 }
                 'M' -> { reverseIndex(); i += 2 }
@@ -158,8 +158,8 @@ class AnsiTerminalBuffer(
         when (final) {
             'A' -> row = (row - p(0)).coerceAtLeast(0)
             'B', 'e' -> row = (row + p(0)).coerceAtMost(rows - 1)
-            'C', 'a' -> col = (col + p(0)).coerceAtMost(cols - 1)
-            'D' -> col = (col - p(0)).coerceAtLeast(0)
+            'C', 'a' -> col = (col.coerceAtMost(cols - 1) + p(0)).coerceAtMost(cols - 1)
+            'D' -> col = (col.coerceAtMost(cols - 1) - p(0)).coerceAtLeast(0)
             'E' -> { row = (row + p(0)).coerceAtMost(rows - 1); col = 0 }
             'F' -> { row = (row - p(0)).coerceAtLeast(0); col = 0 }
             'G', '`' -> col = (p(0) - 1).coerceIn(0, cols - 1)
@@ -171,7 +171,7 @@ class AnsiTerminalBuffer(
             'J' -> eraseDisplay(params.firstOrNull() ?: 0)
             'K' -> eraseLine(params.firstOrNull() ?: 0)
             'm' -> applySgr(params)
-            's' -> { savedRow = row; savedCol = col }
+            's' -> { savedRow = row; savedCol = col.coerceAtMost(cols - 1) }
             'u' -> { row = savedRow.coerceIn(0, rows - 1); col = savedCol.coerceIn(0, cols - 1) }
             'r' -> {
                 val top = (p(0) - 1).coerceIn(0, rows - 1)
@@ -194,16 +194,14 @@ class AnsiTerminalBuffer(
     }
 
     private fun putChar(ch: Char) {
+        // VT faz autowrap somente quando chega o proximo caractere. Assim uma
+        // linha exatamente cheia seguida de CR/LF nao cria uma linha extra.
         if (col >= cols) {
             col = 0
             lineFeed()
         }
         screen()[row][col] = Cell(ch, fg)
         col++
-        if (col >= cols) {
-            col = 0
-            lineFeed()
-        }
     }
 
     private fun lineFeed() {
@@ -232,14 +230,15 @@ class AnsiTerminalBuffer(
 
     private fun eraseDisplay(mode: Int) {
         val s = screen()
+        val x = col.coerceAtMost(cols - 1)
         when (mode) {
             2, 3 -> for (y in 0 until rows) s[y] = blankRow()
             1 -> {
                 for (y in 0 until row) s[y] = blankRow()
-                for (x in 0..col.coerceAtMost(cols - 1)) s[row][x] = Cell()
+                for (i in 0..x) s[row][i] = Cell()
             }
             else -> {
-                for (x in col.coerceAtMost(cols - 1) until cols) s[row][x] = Cell()
+                for (i in x until cols) s[row][i] = Cell()
                 for (y in row + 1 until rows) s[y] = blankRow()
             }
         }
@@ -248,29 +247,33 @@ class AnsiTerminalBuffer(
 
     private fun eraseLine(mode: Int) {
         val line = screen()[row]
+        val x = col.coerceAtMost(cols - 1)
         when (mode) {
-            1 -> for (x in 0..col.coerceAtMost(cols - 1)) line[x] = Cell()
-            2 -> for (x in 0 until cols) line[x] = Cell()
-            else -> for (x in col.coerceAtMost(cols - 1) until cols) line[x] = Cell()
+            1 -> for (i in 0..x) line[i] = Cell()
+            2 -> for (i in 0 until cols) line[i] = Cell()
+            else -> for (i in x until cols) line[i] = Cell()
         }
     }
 
     private fun eraseChars(count: Int) {
         val line = screen()[row]
-        for (x in col until minOf(cols, col + count)) line[x] = Cell()
+        val x = col.coerceAtMost(cols - 1)
+        for (i in x until minOf(cols, x + count)) line[i] = Cell()
     }
 
     private fun deleteChars(count: Int) {
         val line = screen()[row]
-        val n = count.coerceAtMost(cols - col)
-        repeat(n) { if (col < line.size) line.removeAt(col) }
+        val x = col.coerceAtMost(cols - 1)
+        val n = count.coerceAtMost(cols - x)
+        repeat(n) { if (x < line.size) line.removeAt(x) }
         repeat(n) { line.add(Cell()) }
     }
 
     private fun insertChars(count: Int) {
         val line = screen()[row]
-        val n = count.coerceAtMost(cols - col)
-        repeat(n) { line.add(col, Cell()) }
+        val x = col.coerceAtMost(cols - 1)
+        val n = count.coerceAtMost(cols - x)
+        repeat(n) { line.add(x, Cell()) }
         while (line.size > cols) line.removeAt(line.lastIndex)
     }
 
@@ -303,7 +306,6 @@ class AnsiTerminalBuffer(
                 1 -> if (fg in 30..37) fg += 60
                 22 -> if (fg in 90..97) fg -= 60
                 38 -> {
-                    // 256/true-color: aproxima para a paleta ANSI basica.
                     if (i + 2 < values.size && values[i + 1] == 5) {
                         fg = ansi256ToBasic(values[i + 2])
                         i += 2
@@ -325,9 +327,9 @@ class AnsiTerminalBuffer(
 
     private fun rgbToBasic(r: Int, g: Int, b: Int): Int {
         if (r > 200 && g > 200 && b > 200) return 97
-        if (r > g * 1.3 && r > b * 1.3) return 91
-        if (g > r * 1.3 && g > b * 1.3) return 92
-        if (b > r * 1.3 && b > g * 1.3) return 94
+        if (r * 10 > g * 13 && r * 10 > b * 13) return 91
+        if (g * 10 > r * 13 && g * 10 > b * 13) return 92
+        if (b * 10 > r * 13 && b * 10 > g * 13) return 94
         if (r > 160 && g > 120 && b < 120) return 93
         if (r > 150 && b > 150 && g < 150) return 95
         if (g > 150 && b > 150 && r < 150) return 96
@@ -338,7 +340,7 @@ class AnsiTerminalBuffer(
         if (enable == alternateActive) return
         if (enable) {
             normalSavedRow = row
-            normalSavedCol = col
+            normalSavedCol = col.coerceAtMost(cols - 1)
             alternate = newScreen()
             alternateActive = true
             row = 0
