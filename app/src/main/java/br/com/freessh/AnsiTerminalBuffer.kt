@@ -75,6 +75,9 @@ class AnsiTerminalBuffer(
     @Synchronized
     fun render(): String = renderLocked()
 
+    @Synchronized
+    fun isFullScreen(): Boolean = alternateActive
+
     private fun parse(input: String) {
         pending = ""
         var i = 0
@@ -194,8 +197,6 @@ class AnsiTerminalBuffer(
     }
 
     private fun putChar(ch: Char) {
-        // VT faz autowrap somente quando chega o proximo caractere. Assim uma
-        // linha exatamente cheia seguida de CR/LF nao cria uma linha extra.
         if (col >= cols) {
             col = 0
             lineFeed()
@@ -232,7 +233,15 @@ class AnsiTerminalBuffer(
         val s = screen()
         val x = col.coerceAtMost(cols - 1)
         when (mode) {
-            2, 3 -> for (y in 0 until rows) s[y] = blankRow()
+            2, 3 -> {
+                for (y in 0 until rows) s[y] = blankRow()
+                // Programas de tela inteira que nao usam alternate-screen (top,
+                // watch e semelhantes) costumam redesenhar com CSI 2 J. Se o
+                // scrollback continuar sendo exibido como log, cada refresh
+                // parece uma nova pagina. Limpar o historico aqui reproduz o
+                // comportamento visual esperado de um terminal interativo.
+                if (!alternateActive) scrollback.clear()
+            }
             1 -> {
                 for (y in 0 until row) s[y] = blankRow()
                 for (i in 0..x) s[row][i] = Cell()
@@ -242,7 +251,6 @@ class AnsiTerminalBuffer(
                 for (y in row + 1 until rows) s[y] = blankRow()
             }
         }
-        if (mode == 3 && !alternateActive) scrollback.clear()
     }
 
     private fun eraseLine(mode: Int) {
